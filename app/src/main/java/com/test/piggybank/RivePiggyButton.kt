@@ -2,13 +2,19 @@ package com.test.piggybank
 
 
 import android.content.Context
-import android.graphics.SurfaceTexture
+import android.graphics.RectF
 import android.util.AttributeSet
-import android.util.Log
 import android.view.MotionEvent
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleObserver
 import app.rive.runtime.kotlin.RiveTextureView
-import app.rive.runtime.kotlin.core.*
-import app.rive.runtime.kotlin.renderers.RendererSkia
+import app.rive.runtime.kotlin.controllers.RiveFileController
+import app.rive.runtime.kotlin.core.Alignment
+import app.rive.runtime.kotlin.core.Artboard
+import app.rive.runtime.kotlin.core.File
+import app.rive.runtime.kotlin.core.Fit
+import app.rive.runtime.kotlin.core.LinearAnimationInstance
+import app.rive.runtime.kotlin.renderers.Renderer
 
 
 class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(context, attrs) {
@@ -17,7 +23,7 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
     /** Our custom render loop!
      *  calls to draw/advance will happen from a separate thread so beware!
      */
-    override val renderer = object : RendererSkia() {
+    override fun createRenderer() = object : Renderer() {
         /**
          * Draw our animation in its current state when android requests a draw operation.
          *
@@ -31,7 +37,7 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
         override fun draw() {
 
             save()
-            align(Fit.COVER, Alignment.CENTER,   AABB(width, height),backgroundArtboard.bounds,)
+            align(Fit.COVER, Alignment.CENTER, RectF(0f, 0f, width, height),backgroundArtboard.bounds)
 
             backgroundArtboard.drawSkia(cppPointer);
 
@@ -57,16 +63,16 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
          */
         override fun advance(elapsed: Float) {
             backgroundArtboard.advance(elapsed)
-            piggyStateMachineInstance.apply(piggyArtboard, elapsed)
+            piggyStateMachineInstance.apply(elapsed)
             piggyArtboard.advance(elapsed)
-            val removeMe: MutableList<Pair<Artboard, StateMachineInstance>> = mutableListOf()
+            val removeMe: MutableList<Pair<Artboard, LinearAnimationInstance>> = mutableListOf()
 
             for (pair in flyingCoins) {
                 flyingCoinTimes[pair] = flyingCoinTimes[pair] as Float + elapsed;
                 if (flyingCoinTimes[pair] as Float > 1.7) {
                     removeMe.add(pair)
                 }
-                pair.second.apply(pair.first, elapsed);
+                pair.second.apply(elapsed);
                 pair.first.advance(elapsed);
             }
 
@@ -77,38 +83,31 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
         }
     }
 
+    override fun createObserver(): LifecycleObserver = object : DefaultLifecycleObserver {
+    }
 
     // Keep a reference to the file to keep resources around.
     private val file: File = File(resources.openRawResource(R.raw.piggy).readBytes())
+    private val controller = RiveFileController()
 
-    private val backgroundArtboard: Artboard = file.artboard("Background");
-    private val piggyArtboard: Artboard = file.artboard("Piggy");
-    private val coinArtboard: Artboard = file.artboard("Coin");
+    private val backgroundArtboard: Artboard by lazy { file?.artboard("Background")!! }
+    private val piggyArtboard: Artboard by lazy { file?.artboard("Piggy")!! }
 
+    private val piggyStateMachineInstance by lazy { piggyArtboard.firstAnimation }
 
-    private val piggyStateMachineInstance: StateMachineInstance;
-    private val piggyStateMachine: StateMachine = piggyArtboard.stateMachine("PiggyMachine");
-    private val coinStateMachine: StateMachine = coinArtboard.stateMachine("CoinMachine");
-
-    private val pressedInput: SMITrigger;
-
-    private val flyingCoins: MutableList<Pair<Artboard, StateMachineInstance>> = mutableListOf()
-    private val flyingCoinTimes: MutableMap<Pair<Artboard, StateMachineInstance>, Float> =
-        mutableMapOf()
-
+    private val flyingCoins: MutableList<Pair<Artboard, LinearAnimationInstance>> = mutableListOf()
+    private val flyingCoinTimes: MutableMap<Pair<Artboard, LinearAnimationInstance>, Float> = mutableMapOf()
 
     init {
-        piggyStateMachineInstance = StateMachineInstance(piggyStateMachine)
-        pressedInput = piggyStateMachineInstance.input("Pressed") as SMITrigger
+        controller.setRiveFile(file)
     }
-
 
     /**
      * Someone presses anywhere on the screen, if its a down press lets make the piggy sing!
       */
-    override fun onTouchEvent(event: MotionEvent?): Boolean {
+    override fun onTouchEvent(event: MotionEvent): Boolean {
         // we want to trigger a coin animation when we detect a down press
-        if (event?.action == MotionEvent.ACTION_DOWN) {
+        if (event.action == MotionEvent.ACTION_DOWN) {
             showMeTheMoney()
         }
 
@@ -119,24 +118,25 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
      * Add a new coin into the mix.
      */
     fun showMeTheMoney() {
-        pressedInput.fire()
-
-        // create a new state machine instance for the coin state machine, so we can track
-        // its state separately to the other flying coins.
-        val coinStateMachineInstance = StateMachineInstance(coinStateMachine);
-
-        // randomize the state machine input slightly so that the coins do not all follow the same path
-        val coinRandomInput = coinStateMachineInstance.input("CoinRandomization") as SMINumber;
-        coinRandomInput.value = (Math.random() * 100).toFloat();
+        piggyArtboard.stateMachineNames.forEach {
+            controller.fireState(it, "Pressed")
+        }
 
         // instantiate a fresh copy of the coinArtboard, this creates a new coin shape that we can
         // move and animate, without impacting other flying coins
-        val coinArtboardInstance = coinArtboard.getInstance()
+        val coinArtboardInstance = file?.artboard("Coin")!!
+
+        // randomize the state machine input slightly so that the coins do not all follow the same path
+        coinArtboardInstance.stateMachineNames.forEach { controller.setNumberState(it, "CoinRandomization", (Math.random() * 100).toFloat()) }
+
+        // create a new state machine instance for the coin state machine, so we can track
+        // its state separately to the other flying coins.
+        val coinStateMachineInstance = coinArtboardInstance.animation("Coin")
 
         // its time advance our coin, it forces the beginning key of the animation to be applied.
         // without this, the first frame would be how the artboard looks in design mode, in this case
         // a coin in the center of the artboard.
-        coinStateMachineInstance.apply(coinArtboardInstance, 0.0f);
+        coinStateMachineInstance.apply(0.0f);
         coinArtboardInstance.advance(0.0f);
 
         // track this pair so that we can advance the animation and discard it when the animation
@@ -145,6 +145,4 @@ class RivePiggyButton(context: Context, attrs: AttributeSet?) : RiveTextureView(
         flyingCoins.add(newPair)
         flyingCoinTimes[newPair] = 0.0f
     }
-
-
 }
